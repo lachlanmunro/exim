@@ -8,33 +8,54 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"time"
 
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
 
 func main() {
-	email := flag.String("email", "test.com", "A regex that determines is an email is one of us")
-	glob := flag.String("glob", "*main.log*", "A glob pattern for matching exim logfiles to eat")
-	logFrequency := flag.Int("log", 100, "The number of lines to read per log message")
+	email := flag.String("email", "example.com", "A regex that determines is an email is one of us")
+	glob := flag.String("files", "*main.log*", "A glob pattern for matching exim logfiles to eat")
+	logFrequency := flag.Int("log", 200, "The number of lines to read per log message")
 	outFileName := flag.String("out", "emails", "The resulting email file")
+	level := flag.String("level", "info", "Log level is one of debug, info, warn, error, fatal, panic")
+	pretty := flag.Bool("pretty", true, "Use pretty logging (slower)")
 	flag.Parse()
-	log.Debug().Str("email", *email).Str("glob", *glob).Time("time", time.Now()).Msg("spinning up")
+
+	if *pretty {
+		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
+	}
+
+	loglevel, err := zerolog.ParseLevel(*level)
+	if err != nil {
+		log.Fatal().Str("loglevel", *level).Err(err).Msg("Loglevel must be one of debug, info, warn, error, fatal, panic")
+	}
+	zerolog.SetGlobalLevel(loglevel)
+	zerolog.TimeFieldFormat = ""
+
+	log.Info().
+		Str("email", *email).
+		Str("files", *glob).
+		Int("frequency", *logFrequency).
+		Str("outfile", *outFileName).
+		Str("level", *level).
+		Bool("pretty", *pretty).
+		Msg("Starting exim4 logfile cruncher")
 
 	emailRegex, err := regexp.Compile(*email)
 	if err != nil {
-		log.Fatal().Err(err).Msg("email regex did not compile")
+		log.Fatal().Err(err).Msg("Email regex did not compile")
 	}
 
 	fileNames, err := filepath.Glob(*glob)
 	if err != nil {
-		log.Fatal().Str("glob", *glob).Err(err).Msg("failed to get files")
+		log.Fatal().Str("pattern", *glob).Err(err).Msg("Failed to get files by glob")
 	}
 
 	outFile, err := os.Create(*outFileName)
 	defer outFile.Close()
 	if err != nil {
-		log.Fatal().Str("file", *outFileName).Err(err).Msg("failed to open output file")
+		log.Fatal().Str("name", *outFileName).Err(err).Msg("Failed to open output file")
 	}
 
 	emails := make(map[string]map[string]bool)
@@ -42,12 +63,13 @@ func main() {
 	lineCount := 0
 	matchCount := 0
 	ignoreCount := 0
+
 FileLoop:
 	for _, fileName := range fileNames {
 		inFile, err := os.Open(fileName)
 		defer inFile.Close()
 		if err != nil {
-			log.Error().Str("file", fileName).Err(err).Msg("could not open")
+			log.Error().Str("name", fileName).Err(err).Msg("Could not open file")
 		}
 
 		var reader *bufio.Reader
@@ -55,18 +77,18 @@ FileLoop:
 			gzReader, err := gzip.NewReader(inFile)
 			defer gzReader.Close()
 			if err != nil {
-				log.Error().Str("file", fileName).Err(err).Msg("could not read gz")
+				log.Error().Str("name", fileName).Err(err).Msg("Could not read gzipped file")
 			}
 			reader = bufio.NewReader(gzReader)
 		} else {
 			reader = bufio.NewReader(inFile)
 		}
 
-		log.Debug().Str("file", fileName).Time("time", time.Now()).Msg("reading file")
+		log.Info().Str("name", fileName).Msg("Reading file")
 		logLineCount := *logFrequency
 		for {
 			if logLineCount <= 0 {
-				log.Debug().Int("lines", lineCount).Int("matched", matchCount).Int("ignored", ignoreCount).Time("time", time.Now()).Msg("have processed")
+				log.Info().Int("lines", lineCount).Int("matched", matchCount).Int("ignored", ignoreCount).Msg("Crunching progress")
 			}
 
 			line, err := reader.ReadString('\n')
@@ -74,7 +96,7 @@ FileLoop:
 				if err == io.EOF {
 					break
 				} else {
-					log.Error().Str("file", fileName).Err(err).Msg("could not read")
+					log.Error().Str("name", fileName).Err(err).Msg("Could not read file")
 					continue FileLoop
 				}
 			}
@@ -112,8 +134,10 @@ FileLoop:
 			logLineCount--
 		}
 
-		log.Debug().Str("file", fileName).Time("time", time.Now()).Msg("finished reading file")
+		log.Debug().Str("file", fileName).Msg("Finished reading file")
 	}
+
+	log.Info().Int("count", matchCount).Msg("Writing emails to file")
 	writer := bufio.NewWriter(outFile)
 	for us, theirEmails := range emails {
 		writer.WriteString(us)
@@ -124,8 +148,8 @@ FileLoop:
 
 		writer.WriteByte('\n')
 		writer.Flush()
-		log.Debug().Str("for", us).Msg("finished emails")
+		log.Debug().Str("for", us).Msg("Finished emails")
 	}
 
-	log.Debug().Int("lines", lineCount).Int("matched", matchCount).Int("ignored", ignoreCount).Time("time", time.Now()).Msg("done")
+	log.Info().Int("lines", lineCount).Int("matched", matchCount).Int("ignored", ignoreCount).Msg("Finished crunching logfiles")
 }
