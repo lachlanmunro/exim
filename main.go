@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"compress/gzip"
 	"flag"
 	"io"
 	"os"
@@ -14,7 +15,7 @@ import (
 
 func main() {
 	email := flag.String("email", "test.com", "A regex that determines is an email is one of us")
-	glob := flag.String("glob", "*main.log", "A glob pattern for matching exim logfiles to eat")
+	glob := flag.String("glob", "*main.log*", "A glob pattern for matching exim logfiles to eat")
 	logFrequency := flag.Int("log", 100, "The number of lines to read per log message")
 	outFileName := flag.String("out", "emails", "The resulting email file")
 	flag.Parse()
@@ -41,27 +42,43 @@ func main() {
 	lineCount := 0
 	matchCount := 0
 	ignoreCount := 0
+FileLoop:
 	for _, fileName := range fileNames {
 		inFile, err := os.Open(fileName)
 		defer inFile.Close()
 		if err != nil {
 			log.Error().Str("file", fileName).Err(err).Msg("could not open")
 		}
+
+		var reader *bufio.Reader
+		if filepath.Ext(fileName) == ".gz" {
+			gzReader, err := gzip.NewReader(inFile)
+			defer gzReader.Close()
+			if err != nil {
+				log.Error().Str("file", fileName).Err(err).Msg("could not read gz")
+			}
+			reader = bufio.NewReader(gzReader)
+		} else {
+			reader = bufio.NewReader(inFile)
+		}
+
 		log.Debug().Str("file", fileName).Time("time", time.Now()).Msg("reading file")
-		reader := bufio.NewReader(inFile)
 		logLineCount := *logFrequency
 		for {
 			if logLineCount <= 0 {
 				log.Debug().Int("lines", lineCount).Int("matched", matchCount).Int("ignored", ignoreCount).Time("time", time.Now()).Msg("have processed")
 			}
+
 			line, err := reader.ReadString('\n')
 			if err != nil {
 				if err == io.EOF {
 					break
 				} else {
 					log.Error().Str("file", fileName).Err(err).Msg("could not read")
+					continue FileLoop
 				}
 			}
+
 			matches := lineMatch.FindStringSubmatch(line)
 			if matches != nil {
 				to := matches[1]
@@ -72,6 +89,7 @@ func main() {
 					ignoreCount++
 					continue
 				}
+
 				matchCount++
 				if toIsMatch {
 					val, ok := emails[to]
@@ -89,9 +107,11 @@ func main() {
 					}
 				}
 			}
+
 			lineCount++
 			logLineCount--
 		}
+
 		log.Debug().Str("file", fileName).Time("time", time.Now()).Msg("finished reading file")
 	}
 	writer := bufio.NewWriter(outFile)
@@ -101,9 +121,11 @@ func main() {
 			writer.WriteByte(',')
 			writer.WriteString(them)
 		}
+
 		writer.WriteByte('\n')
 		writer.Flush()
 		log.Debug().Str("for", us).Msg("finished emails")
 	}
+
 	log.Debug().Int("lines", lineCount).Int("matched", matchCount).Int("ignored", ignoreCount).Time("time", time.Now()).Msg("done")
 }
