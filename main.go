@@ -2,12 +2,14 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"flag"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -15,8 +17,9 @@ import (
 
 func main() {
 	email := flag.String("email", "example.com", "A regex that determines is an email is one of us")
+	ignore := flag.String("ignore", "example.com", "A regex that determines if a to email should be ignored")
 	glob := flag.String("files", "*main.log*", "A glob pattern for matching exim logfiles to eat")
-	logFrequency := flag.Int("log", 200, "The number of lines to read per log message")
+	logFrequency := flag.Int("log", 100000, "The number of lines to read per log message")
 	outFileName := flag.String("out", "emails", "The resulting email file")
 	level := flag.String("level", "info", "Log level is one of debug, info, warn, error, fatal, panic")
 	pretty := flag.Bool("pretty", true, "Use pretty logging (slower)")
@@ -39,8 +42,14 @@ func main() {
 		Int("frequency", *logFrequency).
 		Str("outfile", *outFileName).
 		Str("level", *level).
+		Str("ignore", *ignore).
 		Bool("pretty", *pretty).
 		Msg("Starting exim4 logfile cruncher")
+
+	ignoreRegex, err := regexp.Compile(*ignore)
+	if err != nil {
+		log.Fatal().Err(err).Msg("Ignore regex did not compile")
+	}
 
 	emailRegex, err := regexp.Compile(*email)
 	if err != nil {
@@ -63,6 +72,9 @@ func main() {
 	lineCount := 0
 	matchCount := 0
 	ignoreCount := 0
+	fromCount := 0
+	fileCount := len(fileNames)
+	startTime := time.Now()
 
 FileLoop:
 	for _, fileName := range fileNames {
@@ -84,14 +96,20 @@ FileLoop:
 			reader = bufio.NewReader(inFile)
 		}
 
-		log.Info().Str("name", fileName).Msg("Reading file")
+		log.Info().Str("name", fileName).Int("remaining", fileCount).Msg("Reading file")
 		logLineCount := *logFrequency
 		for {
 			if logLineCount <= 0 {
-				log.Info().Int("lines", lineCount).Int("matched", matchCount).Int("ignored", ignoreCount).Msg("Crunching progress")
+				logLineCount = *logFrequency
+				log.Info().
+					Int("lines", lineCount).
+					Int("matched", matchCount).
+					Int("ignored", ignoreCount).
+					Int("from", fromCount).
+					Msg("Crunching progress")
 			}
 
-			line, err := reader.ReadString('\n')
+			line, err := reader.ReadBytes('\n')
 			if err != nil {
 				if err == io.EOF {
 					break
@@ -101,40 +119,38 @@ FileLoop:
 				}
 			}
 
-			matches := lineMatch.FindStringSubmatch(line)
+			matches := lineMatch.FindSubmatch(line)
 			if matches != nil {
-				to := matches[1]
-				from := matches[2]
-				toIsMatch := emailRegex.MatchString(to)
-				fromIsMatch := emailRegex.MatchString(from)
-				if toIsMatch && fromIsMatch {
+				from := matches[1]
+				if !emailRegex.Match(from) {
 					ignoreCount++
 					continue
 				}
 
-				matchCount++
-				if toIsMatch {
-					val, ok := emails[to]
-					if ok {
-						val[from] = true
-					} else {
-						emails[to] = map[string]bool{from: true}
-					}
-				} else {
-					val, ok := emails[from]
-					if ok {
-						val[to] = true
-					} else {
-						emails[from] = map[string]bool{to: true}
-					}
+				to := matches[2]
+				if ignore := ignoreRegex.Match(to); ignore {
+					ignoreCount++
+					continue
 				}
+
+				fromAsString := string(bytes.Map(toLower, from))
+				toAsString := string(bytes.Map(toLower, to))
+				val, ok := emails[fromAsString]
+				if ok {
+					val[toAsString] = true
+				} else {
+					fromCount++
+					emails[fromAsString] = map[string]bool{toAsString: true}
+				}
+				matchCount++
 			}
 
 			lineCount++
 			logLineCount--
 		}
 
-		log.Debug().Str("file", fileName).Msg("Finished reading file")
+		fileCount--
+		log.Debug().Str("file", fileName).Dur("elapsed", time.Since(startTime)).Msg("Finished reading file")
 	}
 
 	log.Info().Int("count", matchCount).Msg("Writing emails to file")
@@ -151,5 +167,18 @@ FileLoop:
 		log.Debug().Str("for", us).Msg("Finished emails")
 	}
 
-	log.Info().Int("lines", lineCount).Int("matched", matchCount).Int("ignored", ignoreCount).Msg("Finished crunching logfiles")
+	log.Info().
+		Int("lines", lineCount).
+		Int("matched", matchCount).
+		Int("ignored", ignoreCount).
+		Int("from", fromCount).
+		Dur("elapsed", time.Since(startTime)).
+		Msg("Finished crunching logfiles")
+}
+
+func toLower(r rune) rune {
+	if 'A' <= r && r <= 'Z' {
+		r -= 'A' - 'a'
+	}
+	return r
 }
