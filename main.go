@@ -21,7 +21,7 @@ var (
 	emailRegex     *regexp.Regexp
 	emails         = make(map[string]map[string]bool)
 	writeLock      = sync.Mutex{}
-	waitGroup      = sync.WaitGroup{}
+	sem            chan bool
 	lineMatch      = regexp.MustCompile(`.+ <= (?P<from>\S+) .+ for (?P<to>\S+)`)
 	lineCount      = 0
 	matchCount     = 0
@@ -41,6 +41,7 @@ func main() {
 	outFileName := flag.String("out", "emails", "The resulting email file")
 	level := flag.String("level", "info", "Log level is one of debug, info, warn, error, fatal, panic")
 	pretty := flag.Bool("pretty", true, "Use pretty logging (slower)")
+	threads := flag.Int("threads", 10, "The number of lines to read per log message")
 	flag.Parse()
 
 	if *pretty {
@@ -88,11 +89,14 @@ func main() {
 
 	logFrequency = *logFreq
 	logLineCount = logFrequency
+	sem = make(chan bool, *threads)
 	for _, fileName := range fileNames {
-		waitGroup.Add(1)
+		sem <- true
 		go processFile(fileName)
 	}
-	waitGroup.Wait()
+	for i := 0; i < cap(sem); i++ {
+		sem <- true
+	}
 
 	log.Info().Int("count", matchCount).Msg("Writing emails to file")
 	writer := bufio.NewWriter(outFile)
@@ -125,7 +129,7 @@ func toLower(r rune) rune {
 }
 
 func processFile(fileName string) {
-	defer waitGroup.Done()
+	defer func() { <-sem }()
 	inFile, err := os.Open(fileName)
 	defer inFile.Close()
 	if err != nil {
