@@ -9,17 +9,36 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
 
+var (
+	ignoreRegex    *regexp.Regexp
+	emailRegex     *regexp.Regexp
+	emails         = make(map[string]map[string]bool)
+	writeLock      = sync.Mutex{}
+	lineLock       = sync.Mutex{}
+	waitGroup      = sync.WaitGroup{}
+	lineMatch      = regexp.MustCompile(`.+ <= (?P<from>\S+) .+ for (?P<to>\S+)`)
+	lineCount      = 0
+	matchCount     = 0
+	ignoreCount    = 0
+	fromCount      = 0
+	remainingFiles = 0
+	startTime      = time.Now()
+	logLineCount   = 1
+	logFrequency   = 1
+)
+
 func main() {
 	email := flag.String("email", "example.com", "A regex that determines is an email is one of us")
 	ignore := flag.String("ignore", "example.com", "A regex that determines if a to email should be ignored")
 	glob := flag.String("files", "*main.log*", "A glob pattern for matching exim logfiles to eat")
-	logFrequency := flag.Int("log", 100000, "The number of lines to read per log message")
+	logFreq := flag.Int("log", 100000, "The number of lines to read per log message")
 	outFileName := flag.String("out", "emails", "The resulting email file")
 	level := flag.String("level", "info", "Log level is one of debug, info, warn, error, fatal, panic")
 	pretty := flag.Bool("pretty", true, "Use pretty logging (slower)")
@@ -39,19 +58,19 @@ func main() {
 	log.Info().
 		Str("email", *email).
 		Str("files", *glob).
-		Int("frequency", *logFrequency).
+		Int("frequency", *logFreq).
 		Str("outfile", *outFileName).
 		Str("level", *level).
 		Str("ignore", *ignore).
 		Bool("pretty", *pretty).
 		Msg("Starting exim4 logfile cruncher")
 
-	ignoreRegex, err := regexp.Compile(*ignore)
+	ignoreRegex, err = regexp.Compile(*ignore)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Ignore regex did not compile")
 	}
 
-	emailRegex, err := regexp.Compile(*email)
+	emailRegex, err = regexp.Compile(*email)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Email regex did not compile")
 	}
@@ -60,6 +79,7 @@ func main() {
 	if err != nil {
 		log.Fatal().Str("pattern", *glob).Err(err).Msg("Failed to get files by glob")
 	}
+	remainingFiles = len(fileNames)
 
 	outFile, err := os.Create(*outFileName)
 	defer outFile.Close()
@@ -67,91 +87,13 @@ func main() {
 		log.Fatal().Str("name", *outFileName).Err(err).Msg("Failed to open output file")
 	}
 
-	emails := make(map[string]map[string]bool)
-	lineMatch := regexp.MustCompile(`.+ <= (?P<from>\S+) .+ for (?P<to>\S+)`)
-	lineCount := 0
-	matchCount := 0
-	ignoreCount := 0
-	fromCount := 0
-	fileCount := len(fileNames)
-	startTime := time.Now()
-
-FileLoop:
+	logFrequency = *logFreq
+	logLineCount = logFrequency
 	for _, fileName := range fileNames {
-		inFile, err := os.Open(fileName)
-		defer inFile.Close()
-		if err != nil {
-			log.Error().Str("name", fileName).Err(err).Msg("Could not open file")
-		}
-
-		var reader *bufio.Reader
-		if filepath.Ext(fileName) == ".gz" {
-			gzReader, err := gzip.NewReader(inFile)
-			defer gzReader.Close()
-			if err != nil {
-				log.Error().Str("name", fileName).Err(err).Msg("Could not read gzipped file")
-			}
-			reader = bufio.NewReader(gzReader)
-		} else {
-			reader = bufio.NewReader(inFile)
-		}
-
-		log.Info().Str("name", fileName).Int("remaining", fileCount).Msg("Reading file")
-		logLineCount := *logFrequency
-		for {
-			if logLineCount <= 0 {
-				logLineCount = *logFrequency
-				log.Info().
-					Int("lines", lineCount).
-					Int("matched", matchCount).
-					Int("ignored", ignoreCount).
-					Int("from", fromCount).
-					Msg("Crunching progress")
-			}
-
-			line, err := reader.ReadBytes('\n')
-			if err != nil {
-				if err == io.EOF {
-					break
-				} else {
-					log.Error().Str("name", fileName).Err(err).Msg("Could not read file")
-					continue FileLoop
-				}
-			}
-
-			matches := lineMatch.FindSubmatch(line)
-			if matches != nil {
-				from := matches[1]
-				if !emailRegex.Match(from) {
-					ignoreCount++
-					continue
-				}
-
-				to := matches[2]
-				if ignore := ignoreRegex.Match(to); ignore {
-					ignoreCount++
-					continue
-				}
-
-				fromAsString := string(bytes.Map(toLower, from))
-				toAsString := string(bytes.Map(toLower, to))
-				val, ok := emails[fromAsString]
-				if ok {
-					val[toAsString] = true
-				} else {
-					fromCount++
-					emails[fromAsString] = map[string]bool{toAsString: true}
-				}
-				matchCount++
-			}
-
-			lineCount++
-			logLineCount--
-		}
-
-		fileCount--
-		log.Debug().Str("file", fileName).Dur("elapsed", time.Since(startTime)).Msg("Finished reading file")
+		waitGroup.Add(1)
+		go processFile(fileName)
 	}
+	waitGroup.Wait()
 
 	log.Info().Int("count", matchCount).Msg("Writing emails to file")
 	writer := bufio.NewWriter(outFile)
@@ -181,4 +123,82 @@ func toLower(r rune) rune {
 		r -= 'A' - 'a'
 	}
 	return r
+}
+
+func processFile(fileName string) {
+	defer waitGroup.Done()
+	inFile, err := os.Open(fileName)
+	defer inFile.Close()
+	if err != nil {
+		log.Error().Str("name", fileName).Err(err).Msg("Could not open file")
+	}
+
+	var reader *bufio.Reader
+	if filepath.Ext(fileName) == ".gz" {
+		gzReader, err := gzip.NewReader(inFile)
+		defer gzReader.Close()
+		if err != nil {
+			log.Error().Str("name", fileName).Err(err).Msg("Could not read gzipped file")
+		}
+		reader = bufio.NewReader(gzReader)
+	} else {
+		reader = bufio.NewReader(inFile)
+	}
+
+	log.Info().Str("name", fileName).Int("remaining", remainingFiles).Msg("Reading file")
+	for {
+		if logLineCount <= 0 {
+			logLineCount = logFrequency
+			log.Info().
+				Int("lines", lineCount).
+				Int("matched", matchCount).
+				Int("ignored", ignoreCount).
+				Int("from", fromCount).
+				Msg("Crunching progress")
+		}
+
+		line, err := reader.ReadBytes('\n')
+		if err != nil {
+			if err == io.EOF {
+				break
+			} else {
+				log.Error().Str("name", fileName).Err(err).Msg("Could not read file")
+				return
+			}
+		}
+
+		matches := lineMatch.FindSubmatch(line)
+		if matches != nil {
+			from := matches[1]
+			if !emailRegex.Match(from) {
+				ignoreCount++
+				continue
+			}
+
+			to := matches[2]
+			if ignore := ignoreRegex.Match(to); ignore {
+				ignoreCount++
+				continue
+			}
+
+			fromAsString := string(bytes.Map(toLower, from))
+			toAsString := string(bytes.Map(toLower, to))
+			writeLock.Lock()
+			val, ok := emails[fromAsString]
+			if ok {
+				val[toAsString] = true
+			} else {
+				fromCount++
+				emails[fromAsString] = map[string]bool{toAsString: true}
+			}
+			writeLock.Unlock()
+			matchCount++
+		}
+
+		lineCount++
+		logLineCount--
+	}
+
+	remainingFiles--
+	log.Debug().Str("file", fileName).Dur("elapsed", time.Since(startTime)).Msg("Finished reading file")
 }
