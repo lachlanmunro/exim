@@ -34,14 +34,14 @@ var (
 )
 
 func main() {
-	email := flag.String("email", "example.com", "A regex that determines is an email is one of us")
-	ignore := flag.String("ignore", "example.com", "A regex that determines if a to email should be ignored")
+	email := flag.String("email", ".*", "A regex that determines is an email should be selected to group against")
+	ignore := flag.String("ignore", "^$", "A regex that determines if a to email should be ignored")
 	glob := flag.String("files", "*main.log*", "A glob pattern for matching exim logfiles to eat")
 	logFreq := flag.Int("log", 1000000, "The number of lines to read per log message")
 	outFileName := flag.String("out", "emails", "The resulting email file")
 	level := flag.String("level", "info", "Log level is one of debug, info, warn, error, fatal, panic")
 	pretty := flag.Bool("pretty", true, "Use pretty logging (slower)")
-	threads := flag.Int("threads", 10, "The number of lines to read per log message")
+	threads := flag.Int("threads", 500, "The number of lines to read per log message")
 	flag.Parse()
 
 	if *pretty {
@@ -121,9 +121,11 @@ func main() {
 		Msg("Finished crunching logfiles")
 }
 
+const letterDiff = 'A' - 'a'
+
 func toLower(r rune) rune {
 	if 'A' <= r && r <= 'Z' {
-		r -= 'A' - 'a'
+		return r - letterDiff
 	}
 	return r
 }
