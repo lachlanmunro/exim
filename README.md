@@ -4,6 +4,4 @@ A so hacky that it should've been a bash script golang program for parsing exim4
 
 ## Purpose
 
-If you have logs from an exim4 email server and want to be able to pull all the emails that corresponded grouped against an internal email address set (defined by regex) then this is the tool for you.
-
-There is absolutely 0 chance this is particularly performant.
+Reads exim4 email server logs to create a list of email addresses sent to (regex match `-ignore "^$"` so you can discard internal mail/spam) grouped by email sent from (regex match `-email ".*"` so you can ignore no-reply etc). Results in a file with email addresses sent to by local addresses. Outbound emails only. I've had it churn through a five or so years woth of email logs without too much trouble.
