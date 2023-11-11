@@ -1,5 +1,9 @@
 # exim
 
+It's been useful to me several times and the format doesn't change. Maybe it's useful to you too. But it's getting no work, its archived, just take what you want.
+
+##
+
 A so hacky that it should've been a bash script golang program for parsing exim4 logs to pull a csv of emails against their "owners".
 
 ## Purpose
